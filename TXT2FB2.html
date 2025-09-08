@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TXT → FB2 豪华转换器</title>
+<meta name="color-scheme" content="light dark">
+<style>
+:root{
+  --bg: #f2f4f7; --card: #ffffffd9; --text: #222; --accent: linear-gradient(135deg,#667eea 0%,#764ba2 100%);
+  --shadow: 0 8px 32px #0000001a; --radius: 16px;
+}
+@media (prefers-color-scheme:dark){
+:root{ --bg: #121212; --card: #1e1e1ed9; --text: #eee; }
+}
+*{
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans",sans-serif;
+}
+body{
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 1rem;
+}
+.container{
+  width: 100%;
+  max-width: 520px;
+  background: var(--card);
+  backdrop-filter: blur(10px);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 2rem;
+}
+h1{
+  font-size: 1.5rem;
+  margin-bottom: .5rem;
+  text-align: center;
+}
+p.sub{
+  font-size: .9rem;
+  opacity: .7;
+  text-align: center;
+  margin-bottom: 1.5rem;
+}
+input[type=file]{
+  display: none;
+}
+label.file{
+  display: block;
+  padding: .8rem 1.2rem;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  text-align: center;
+  cursor: pointer;
+  transition: transform .2s;
+}
+label.file:hover{
+  transform: translateY(-2px);
+}
+.buttons{
+  display: flex;
+  gap: .8rem;
+  margin-top: 1.2rem;
+}
+button{
+  flex: 1;
+  padding: .7rem;
+  font-size: 1rem;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  transition: opacity .2s;
+}
+button:disabled{
+  opacity: .5;
+  cursor: not-allowed;
+}
+#log{
+  margin-top: 1.2rem;
+  font-size: .85rem;
+  max-height: 30vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  background: #00000008;
+  padding: .8rem;
+  border-radius: 8px;
+}
+/* 加载动画 */
+.loading{
+  display: inline-block;
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid #fff;
+  border-bottom-color: transparent;
+  border-radius: 50%;
+  animation: spin .6s linear infinite;
+}
+@keyframes spin{
+  to{
+    transform: rotate(360deg);
+  }
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>📖 TXT → FB2 豪华转换器</h1>
+  <p class="sub">支持 GB18030/GBK/UTF-8，智能识别 卷/章/番外/序章/Extra</p>
+
+  <input type="file" id="pick" accept=".txt">
+  <label for="pick" class="file">选择 TXT 文件</label>
+
+  <div class="buttons">
+    <button id="dl" disabled>下载 *.fb2</button>
+    <button id="cp" disabled>复制 XML</button>
+  </div>
+
+  <div id="log">等待选择文件…</div>
+</div>
+
+<script>
+/* ================= 解码 ================= */
+function decodeText(buf) {
+  const uints = new Uint8Array(buf);
+  try {
+    return new TextDecoder('gb18030', {fatal: true}).decode(uints);
+  } catch (e) {
+    try {
+      return new TextDecoder('gbk', {fatal: true}).decode(uints);
+    } catch (e2) {
+      return new TextDecoder('utf-8', {fatal: true}).decode(uints);
+    }
+  }
+}
+
+/* ================= 章节识别（含番外/卷/序/终/Extra） ================= */
+
+/* ================= 修正后的章节识别 ================= */
+const CHAPTER_RE = [
+  /^\s*(第\s*[\d〇零一二三四五六七八九十百千]+\s*[卷篇章节回集部]\s*[\s\S]*)$/im,
+  /^\s*(番外|外传|Extra|Bonus|序章|终章|后记|前言|序言|附录)\s*[\-—:]?\s*([\s\S]*)$/im,
+  /^\s*(?:Chapter|Chap\.?)\s+[\d〇零一二三四五六七八九十百千]+\s*[\-—:]?\s*([\s\S]*)$/im,
+  /^\s*[\d〇零一二三四五六七八九十百千]+\s*[、.\s]\s*([\s\S]+)$/im
+];
+
+function parseChapters(raw) {
+  const lines = raw.replace(/\r\n/g, '\n').split('\n');
+  const chapters = [];
+  let cur = {title: '', lines: []};
+
+  const push = () => {
+    if (cur.title || cur.lines.length) {
+      cur.title = cur.title.trim();
+      cur.text = cur.lines.join('\n').trim();
+      if (cur.text) chapters.push(cur);
+    }
+    cur = {title: '', lines: []};
+  };
+
+  for (let line of lines) {
+    let hit = false;
+    for (let re of CHAPTER_RE) {
+      if (re.test(line)) {
+        // 关键限制：标题部分（去掉首尾空白）超过20个汉字 → 不算章节
+        const titlePart = line.trim();
+        // 只统计汉字，用 Unicode 范围粗略匹配
+        const hanCount = (titlePart.match(/[\u4e00-\u9fa5]/g) || []).length;
+        if (hanCount <= 20) {
+          hit = true;
+          break;
+        }
+      }
+    }
+    if (hit) { push(); cur.title = line.trim(); }
+    else cur.lines.push(line);
+  }
+  push();
+  return chapters;
+}
+
+
+
+/* ================= 元数据 ================= */
+
+/* ---------- 提取书名：先文件名，再文件内容 ---------- */
+
+function guessMeta(chapters, fullText, fileName) {
+  let bookName = '未知书名', author = '未知作者';
+
+  /* 1. 书名：优先文件名里的《》 */
+  const fnMatch = fileName.match(/《([^《》]+)》/);
+  if (fnMatch) bookName = fnMatch[1];
+
+  /* 2. 作者：文件名里到 [ 或 【 结束 */
+  /* 作者：到换行结束（不含换行） */
+const fnAuthMatch = fileName.match(/作者[:：]\s*([^\[【\r\n]+)/);
+if (fnAuthMatch) {
+  author = fnAuthMatch[1].trim();
+} else {
+  const txtAuthMatch = fullText.slice(0, 600).match(/作者[:：]\s*([^\r\n]+)/);
+  if (txtAuthMatch) {
+    const rawAuth = txtAuthMatch[1].trim();
+    const hanCount = (rawAuth.match(/[\u4e00-\u9fa5]/g) || []).length;
+    author = hanCount <= 20 ? rawAuth : '未知作者';
+  }
+}
+
+
+  /* 4. 书名回退：正文最前 800 字找《》 */
+  if (!fnMatch) {
+    const txtMatch = fullText.slice(0, 800).match(/《([^《》]+)》/);
+    if (txtMatch) bookName = txtMatch[1];
+  }
+
+  /* 5. 极端回退：用第一章标题 */
+  if (bookName === '未知书名' && chapters[0]?.title) bookName = chapters[0].title;
+
+  return {bookName, author};
+}
+
+
+
+/* ================= 生成 FB2 ================= */
+function buildFB2(chapters, meta) {
+  const {bookName, author} =meta;
+  const annotation = chapters[0] ? chapters[0].text.slice(0, 500) + '…' : '';
+  let body = '';
+  chapters.forEach(ch => {
+    body += `<section><title><p>${escapeXml(ch.title || '无题')}</p></title>\n`;
+    body += `<p>${escapeXml(ch.text).split('\n').join('</p>\n<p>')}</p>\n`;
+    body += `</section>\n`;
+  });
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">
+<description>
+  <title-info>
+    <genre>sf</genre>
+    <author><last-name>${escapeXml(author)}</last-name></author>
+    <book-title>${escapeXml(bookName)}</book-title>
+    <annotation><p>${escapeXml(annotation)}</p></annotation>
+    <lang>zh</lang>
+    <src-lang>zh</src-lang>
+  </title-info>
+  <document-info>
+    <author><nickname>txt2fb2</nickname></author>
+    <date>${new Date().toISOString().slice(0,10)}</date>
+    <id>${generateUUID()}</id>
+    <version>1.0</version>
+  </document-info>
+</description>
+<body>${body}</body>
+</FictionBook>`;
+}
+
+/* ================= 小工具 ================= */
+function escapeXml(s) {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c]));
+}
+function generateUUID() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random()*16|0, v = c === 'x' ? r : (r&0x3|0x8);
+    return v.toString(16);
+  });
+}
+
+/* ================= UI 交互 ================= */
+const pick = document.getElementById('pick');
+const dl  = document.getElementById('dl');
+const cp  = document.getElementById('cp');
+const log = document.getElementById('log');
+let lastXML = '';
+
+let baseName = 'book';
+let fullFileName = 'book.txt';   // 新增：存完整原名（含扩展名）
+pick.addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  dl.disabled = cp.disabled = true;
+  log.innerHTML = '<span class="loading"></span> 正在解码并解析章节…';
+
+  baseName     = file.name.replace(/\.[^.]+$/i, '');
+  fullFileName = file.name;                    // 保存完整原名
+  if (baseName.length > 200) baseName = baseName.slice(0, 200);
+
+  const buf  = await file.arrayBuffer();
+  const text = decodeText(buf);
+  const meta = guessMeta([], text, file.name);
+  const chapters = parseChapters(text);
+  lastXML = buildFB2(chapters, meta);
+
+  /* 更新按钮文字：展示完整文件名（含扩展名） */
+
+dl.textContent = '下载FB2文件';
+  /* dl.textContent = '下载 ' + fullFileName + ' 的 FB2 版'; */
+
+  log.innerHTML = `✅ 解析完成！共 ${chapters.length} 章。\n书名：《${meta.bookName}》 作者：${meta.author}`;
+  dl.disabled = cp.disabled = false;
+});
+
+
+
+dl.addEventListener('click', () => {
+  const blob = new Blob([lastXML], {type: 'application/fb2+xml'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = baseName + '.fb2';   // ③ 这里用原始文件名
+  a.click();
+});
+
+
+cp.addEventListener('click', () => {
+  navigator.clipboard.writeText(lastXML).then(() => {
+    log.innerHTML += '\n📋 XML 已复制到剪贴板！';
+  });
+});
+</script>
+</body>
+</html>
